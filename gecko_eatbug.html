@@ -69,7 +69,7 @@
     </div>
     <button class="toggle-btn" onclick="toggleVideo()">隐藏摄像头</button>
     <div class="status loading" id="status">正在加载手部追踪模型...</div>
-    <div class="info">用手控制壁虎的爬行方向 | 食指指尖 = 目标位置</div>
+    <div class="info">用手控制壁虎的爬行方向 | 靠近小虫会自动捕食</div>
 
     <!-- MediaPipe Hands CDN -->
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
@@ -115,6 +115,181 @@
         function vecFromAngle(angle, mag = 1) { return { x: Math.cos(angle) * mag, y: Math.sin(angle) * mag }; }
         function vecDist(a, b) { return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2); }
         function vecLerp(a, b, t) { return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }; }
+
+        // ==================== 小虫类 ====================
+        class Bug {
+            constructor(width, height) {
+                this.width = width;
+                this.height = height;
+                this.spawn();
+            }
+            
+            spawn() {
+                // 从画面边缘随机位置生成
+                const side = Math.floor(Math.random() * 4);
+                const margin = 30;
+                switch(side) {
+                    case 0: // 上
+                        this.x = Math.random() * this.width;
+                        this.y = -margin;
+                        break;
+                    case 1: // 右
+                        this.x = this.width + margin;
+                        this.y = Math.random() * this.height;
+                        break;
+                    case 2: // 下
+                        this.x = Math.random() * this.width;
+                        this.y = this.height + margin;
+                        break;
+                    case 3: // 左
+                        this.x = -margin;
+                        this.y = Math.random() * this.height;
+                        break;
+                }
+                
+                // 向画面中心区域移动的初始方向
+                const centerX = this.width / 2 + (Math.random() - 0.5) * this.width * 0.6;
+                const centerY = this.height / 2 + (Math.random() - 0.5) * this.height * 0.6;
+                this.angle = Math.atan2(centerY - this.y, centerX - this.x);
+                this.speed = 1 + Math.random() * 1.5;
+                this.wobble = 0;
+                this.wobbleSpeed = 0.05 + Math.random() * 0.05;
+                this.size = 4 + Math.random() * 3;
+                
+                // 身体参数
+                this.segments = 4;
+                this.segmentPos = [];
+                for (let i = 0; i < this.segments; i++) {
+                    this.segmentPos.push({ x: this.x - i * 5, y: this.y });
+                }
+                
+                // 被捕食状态
+                this.caught = false;
+                this.caughtProgress = 0;
+                this.caughtBy = null;
+                this.alive = true;
+            }
+            
+            update() {
+                if (this.caught) {
+                    // 被舌头抓住，向壁虎头部移动
+                    this.caughtProgress += 0.03; // 放慢拖入速度
+                    if (this.caughtProgress >= 1) {
+                        this.alive = false; // 被吃掉
+                    }
+                    return;
+                }
+                
+                // 随机摆动
+                this.wobble += this.wobbleSpeed;
+                const wobbleAngle = Math.sin(this.wobble) * 0.3;
+                
+                // 偶尔改变方向
+                if (Math.random() < 0.02) {
+                    this.angle += (Math.random() - 0.5) * Math.PI / 2;
+                }
+                
+                // 移动头部
+                const moveAngle = this.angle + wobbleAngle;
+                this.x += Math.cos(moveAngle) * this.speed;
+                this.y += Math.sin(moveAngle) * this.speed;
+                
+                // 更新身体段
+                this.segmentPos[0] = { x: this.x, y: this.y };
+                for (let i = 1; i < this.segments; i++) {
+                    const prev = this.segmentPos[i - 1];
+                    const curr = this.segmentPos[i];
+                    const dx = curr.x - prev.x;
+                    const dy = curr.y - prev.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    const segDist = this.size * 1.2;
+                    if (dist > segDist) {
+                        const ratio = segDist / dist;
+                        this.segmentPos[i] = {
+                            x: prev.x + dx * ratio,
+                            y: prev.y + dy * ratio
+                        };
+                    }
+                }
+                
+                // 检查是否离开画面太远
+                const margin = 100;
+                if (this.x < -margin || this.x > this.width + margin ||
+                    this.y < -margin || this.y > this.height + margin) {
+                    this.spawn();
+                }
+            }
+            
+            draw(ctx, gecko) {
+                if (!this.alive) return;
+                
+                let drawX = this.x, drawY = this.y;
+                
+                if (this.caught && this.caughtBy) {
+                    // 被抓住时，位置在舌尖和头部之间插值
+                    const headAngle = this.caughtBy.spine.angles[0];
+                    const headPos = this.caughtBy.spine.joints[0];
+                    const headTip = {
+                        x: headPos.x + Math.cos(headAngle) * 45,
+                        y: headPos.y + Math.sin(headAngle) * 45
+                    };
+                    const tongueEnd = {
+                        x: headPos.x + Math.cos(headAngle) * (35 + 35),
+                        y: headPos.y + Math.sin(headAngle) * (35 + 35)
+                    };
+                    
+                    // 从舌尖向头部移动
+                    drawX = tongueEnd.x + (headTip.x - tongueEnd.x) * this.caughtProgress;
+                    drawY = tongueEnd.y + (headTip.y - tongueEnd.y) * this.caughtProgress;
+                    
+                    // 更新所有段的位置
+                    for (let i = 0; i < this.segments; i++) {
+                        this.segmentPos[i] = { x: drawX, y: drawY };
+                    }
+                }
+                
+                // 绘制小虫身体（白色）
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+                ctx.strokeStyle = 'rgba(200, 200, 200, 0.5)';
+                ctx.lineWidth = 1;
+                
+                for (let i = 0; i < this.segments; i++) {
+                    const pos = this.segmentPos[i];
+                    const segSize = this.size * (1 - i * 0.15);
+                    ctx.beginPath();
+                    ctx.arc(pos.x, pos.y, segSize, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.stroke();
+                }
+                
+                // 绘制小腿（如果没被抓）
+                if (!this.caught) {
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
+                    ctx.lineWidth = 1.5;
+                    const legWave = Math.sin(this.wobble * 3);
+                    for (let i = 0; i < 3; i++) {
+                        const segPos = this.segmentPos[Math.min(i, this.segments - 1)];
+                        const legAngle1 = this.angle + Math.PI / 2 + legWave * 0.3;
+                        const legAngle2 = this.angle - Math.PI / 2 - legWave * 0.3;
+                        const legLen = this.size * 1.5;
+                        
+                        ctx.beginPath();
+                        ctx.moveTo(segPos.x, segPos.y);
+                        ctx.lineTo(segPos.x + Math.cos(legAngle1) * legLen, segPos.y + Math.sin(legAngle1) * legLen);
+                        ctx.stroke();
+                        
+                        ctx.beginPath();
+                        ctx.moveTo(segPos.x, segPos.y);
+                        ctx.lineTo(segPos.x + Math.cos(legAngle2) * legLen, segPos.y + Math.sin(legAngle2) * legLen);
+                        ctx.stroke();
+                    }
+                }
+            }
+            
+            getPosition() {
+                return { x: this.x, y: this.y };
+            }
+        }
 
         // ==================== 链式骨骼系统 ====================
         class Chain {
@@ -188,19 +363,77 @@
                 this.tongueColor = '#FFB6C1';
                 this.scheduleNextTongue();
                 this.initialized = false;
+                
+                // 捕食相关
+                this.huntingTarget = null;
+                this.isHunting = false;
             }
             
             scheduleNextTongue() { this.tongueTimer = 120 + Math.random() * 240; }
             
+            // 检测并捕食小虫
+            checkForPrey(bugs) {
+                if (this.isHunting || this.tongueOut > 0) return; // 正在捕食中
+                
+                const headAngle = this.spine.angles[0];
+                const headPos = this.spine.joints[0];
+                const headTip = {
+                    x: headPos.x + Math.cos(headAngle) * 45,
+                    y: headPos.y + Math.sin(headAngle) * 45
+                };
+                
+                for (const bug of bugs) {
+                    if (bug.caught || !bug.alive) continue;
+                    
+                    const bugPos = bug.getPosition();
+                    const dist = vecDist(headTip, bugPos);
+                    
+                    // 检测距离和角度
+                    if (dist < 100) {
+                        const angleToBug = Math.atan2(bugPos.y - headTip.y, bugPos.x - headTip.x);
+                        const angleDiff = Math.abs(relativeAngleDiff(angleToBug, headAngle));
+                        
+                        if (angleDiff < Math.PI / 4) { // 在正前方60度范围内
+                            this.huntingTarget = bug;
+                            this.isHunting = true;
+                            this.tongueTarget = 1; // 伸出舌头
+                            return;
+                        }
+                    }
+                }
+            }
+            
             updateTongue() {
                 this.tongueTimer--;
-                if (this.tongueTimer <= 0 && this.tongueTarget === 0 && this.tongueOut === 0) this.tongueTarget = 1;
+                
+                // 随机吐舌头（非捕食状态）
+                if (this.tongueTimer <= 0 && this.tongueTarget === 0 && this.tongueOut === 0 && !this.isHunting) {
+                    this.tongueTarget = 1;
+                }
+                
                 if (this.tongueTarget === 1) {
-                    this.tongueOut += 0.15;
-                    if (this.tongueOut >= 1) { this.tongueOut = 1; this.tongueTarget = -1; }
+                    this.tongueOut += 0.08; // 舌头伸出速度
+                    if (this.tongueOut >= 1) { 
+                        this.tongueOut = 1; 
+                        this.tongueTarget = -1;
+                        
+                        // 捕获猎物
+                        if (this.isHunting && this.huntingTarget) {
+                            this.huntingTarget.caught = true;
+                            this.huntingTarget.caughtBy = this;
+                        }
+                    }
                 } else if (this.tongueTarget === -1) {
-                    this.tongueOut -= 0.1;
-                    if (this.tongueOut <= 0) { this.tongueOut = 0; this.tongueTarget = 0; this.scheduleNextTongue(); }
+                    this.tongueOut -= 0.05; // 舌头收回速度（更慢，看清小虫被拖入）
+                    if (this.tongueOut <= 0) { 
+                        this.tongueOut = 0; 
+                        this.tongueTarget = 0; 
+                        this.scheduleNextTongue();
+                        
+                        // 完成捕食
+                        this.isHunting = false;
+                        this.huntingTarget = null;
+                    }
                 }
             }
 
@@ -225,16 +458,16 @@
                 }
             }
 
-            display(ctx) {
+            display(ctx, caughtBugs = []) {
                 this.updateTongue();
                 this.drawLegs(ctx);
-                this.drawTongue(ctx);
+                this.drawTongue(ctx, caughtBugs);
                 this.drawBody(ctx);
                 this.drawEyes(ctx);
                 this.drawPatterns(ctx);
             }
             
-            drawTongue(ctx) {
+            drawTongue(ctx, caughtBugs = []) {
                 if (this.tongueOut <= 0) return;
                 const headAngle = this.spine.angles[0];
                 const headPos = this.spine.joints[0];
@@ -245,6 +478,12 @@
                 const tongueMid = { x: tongueBase.x + Math.cos(headAngle) * tongueLength, y: tongueBase.y + Math.sin(headAngle) * tongueLength };
                 const forkLeft = { x: tongueMid.x + Math.cos(headAngle - forkAngle) * forkLength, y: tongueMid.y + Math.sin(headAngle - forkAngle) * forkLength };
                 const forkRight = { x: tongueMid.x + Math.cos(headAngle + forkAngle) * forkLength, y: tongueMid.y + Math.sin(headAngle + forkAngle) * forkLength };
+                
+                // 绘制被抓住的小虫（在舌头后面）
+                for (const bug of caughtBugs) {
+                    bug.draw(ctx, this);
+                }
+                
                 ctx.strokeStyle = this.tongueColor;
                 ctx.lineWidth = 3;
                 ctx.lineCap = 'round';
@@ -374,6 +613,13 @@
         const IDLE_THRESHOLD = 120;
         let idleTimer = 0, idleTarget = null, idleActionTimer = 0;
         
+        // 小虫系统
+        let bugs = [];
+        const MAX_BUGS = 5;
+        const BUG_SPAWN_INTERVAL = 180; // 每3秒生成一只
+        let bugSpawnTimer = 60;
+        let score = 0;
+        
         // 视频显示切换
         function toggleVideo() {
             const btn = document.querySelector('.toggle-btn');
@@ -398,6 +644,13 @@
             gecko = new Gecko({ x: width / 2, y: height / 2 });
             targetX = smoothTargetX = width / 2;
             targetY = smoothTargetY = height / 2;
+            
+            // 初始化一些小虫
+            bugs = [];
+            for (let i = 0; i < 2; i++) {
+                bugs.push(new Bug(width, height));
+            }
+            score = 0;
         }
         
         function generateIdleAction() {
@@ -419,6 +672,32 @@
             ctx.fillRect(0, 0, width, height);
             drawGrid(ctx);
             
+            // ========== 小虫系统 ==========
+            // 生成新小虫
+            bugSpawnTimer--;
+            if (bugSpawnTimer <= 0 && bugs.filter(b => b.alive && !b.caught).length < MAX_BUGS) {
+                bugs.push(new Bug(width, height));
+                bugSpawnTimer = BUG_SPAWN_INTERVAL;
+            }
+            
+            // 更新小虫
+            for (const bug of bugs) {
+                bug.update();
+            }
+            
+            // 移除已被吃掉的小虫
+            const eatenCount = bugs.filter(b => !b.alive).length;
+            score += eatenCount;
+            bugs = bugs.filter(b => b.alive);
+            
+            // 绘制未被抓的小虫（在壁虎下面）
+            for (const bug of bugs) {
+                if (!bug.caught) {
+                    bug.draw(ctx, gecko);
+                }
+            }
+            
+            // ========== 壁虎系统 ==========
             // 检查是否有手部检测
             const now = Date.now();
             if (now - lastHandTime > 500) {
@@ -447,7 +726,17 @@
             smoothTargetY += (currentTargetY - smoothTargetY) * factor;
             
             gecko.resolve(smoothTargetX, smoothTargetY);
-            gecko.display(ctx);
+            
+            // 检测捕食
+            gecko.checkForPrey(bugs);
+            
+            // 获取被抓住的小虫（用于在舌头处绘制）
+            const caughtBugs = bugs.filter(b => b.caught);
+            
+            gecko.display(ctx, caughtBugs);
+            
+            // 绘制分数
+            drawScore(ctx);
             
             // 绘制手部目标指示器
             if (handDetected) {
@@ -465,6 +754,15 @@
             }
             for (let y = 0; y < height; y += 50) { 
                 ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke(); 
+            }
+        }
+        
+        // 绘制分数
+        function drawScore(ctx) {
+            if (score > 0) {
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+                ctx.font = '16px "Segoe UI", sans-serif';
+                ctx.fillText(`🪲 已捕食: ${score}`, 20, height - 50);
             }
         }
         
