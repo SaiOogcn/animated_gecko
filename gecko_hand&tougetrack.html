@@ -68,15 +68,15 @@
         <video id="video" autoplay playsinline></video>
     </div>
     <button class="toggle-btn" onclick="toggleVideo()">隐藏摄像头</button>
-    <div class="status loading" id="status">正在加载追踪模型...</div>
-    <div class="info">😉 眨眼吐舌头 | ✋ 手势控制</div>
+    <div class="status loading" id="status">正在加载手部+面部追踪模型...</div>
+    <div class="info">用手控制壁虎方向 | 吐舌头让壁虎也吐舌头 👅</div>
 
     <!-- MediaPipe Hands CDN -->
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
-    <!-- MediaPipe Face Mesh CDN (用于眼动追踪) -->
+    <!-- MediaPipe Face Mesh CDN (用于舌头检测) -->
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
 
     <script>
@@ -190,21 +190,22 @@
                 this.tongueColor = '#FFB6C1';
                 this.scheduleNextTongue();
                 this.initialized = false;
-                this.userTongueControl = false; // 用户控制舌头标志
+                
+                // 用户控制舌头
+                this.userTongueControl = false;
             }
             
             scheduleNextTongue() { this.tongueTimer = 120 + Math.random() * 240; }
             
-            // 用户触发吐舌头（眨眼）
+            // 用户吐舌头时调用
             triggerTongue() {
-                if (this.tongueTarget === 0 && this.tongueOut < 0.1) {
+                if (this.tongueTarget === 0 && this.tongueOut === 0) {
                     this.userTongueControl = true;
                     this.tongueTarget = 1;
-                    console.log('👅 壁虎吐舌头');
                 }
             }
             
-            // 用户收回舌头
+            // 用户收舌头时调用
             retractTongue() {
                 if (this.userTongueControl && this.tongueOut > 0) {
                     this.tongueTarget = -1;
@@ -212,7 +213,7 @@
             }
             
             updateTongue() {
-                // 自动吐舌头（仅在非用户控制时）
+                // 如果不是用户控制，才使用自动吐舌头
                 if (!this.userTongueControl) {
                     this.tongueTimer--;
                     if (this.tongueTimer <= 0 && this.tongueTarget === 0 && this.tongueOut === 0) {
@@ -224,7 +225,10 @@
                     this.tongueOut += 0.15;
                     if (this.tongueOut >= 1) { 
                         this.tongueOut = 1; 
-                        this.tongueTarget = -1; 
+                        // 用户控制时保持伸出状态，否则自动收回
+                        if (!this.userTongueControl) {
+                            this.tongueTarget = -1; 
+                        }
                     }
                 } else if (this.tongueTarget === -1) {
                     this.tongueOut -= 0.1;
@@ -412,10 +416,11 @@
         let filteredTargetX, filteredTargetY;
         const RAW_SMOOTH = 0.15; // 原始输入的预平滑
         
-        // 眨眼检测（用于吐舌头）
-        let leftEyeOpen = true, rightEyeOpen = true;
-        let blinkFrames = 0;
-        const BLINK_THRESHOLD = 3;
+        // 面部检测相关
+        let faceMesh = null;
+        let isTongueOut = false;
+        let tongueOutFrames = 0;
+        const TONGUE_THRESHOLD = 3; // 连续检测到几帧才触发
         
         // 视频显示切换
         function toggleVideo() {
@@ -476,19 +481,16 @@
             
             let currentTargetX = targetX, currentTargetY = targetY;
             
-            // ===== 输入优先级：手部 > 空闲 =====
-            const handActive = now - lastHandTime < 500;
-            
             // 空闲动画
-            if (idleTimer > IDLE_THRESHOLD && !handActive) {
+            if (idleTimer > IDLE_THRESHOLD) {
                 idleActionTimer--;
                 if (idleActionTimer <= 0 || !idleTarget) generateIdleAction();
                 if (idleTarget) { 
                     currentTargetX = idleTarget.x; 
                     currentTargetY = idleTarget.y; 
                 }
-            } else if (handActive) {
-                // 手部控制
+            } else {
+                // 第一层平滑：过滤手部追踪的原始抖动
                 filteredTargetX += (rawTargetX - filteredTargetX) * RAW_SMOOTH;
                 filteredTargetY += (rawTargetY - filteredTargetY) * RAW_SMOOTH;
                 currentTargetX = filteredTargetX;
@@ -559,57 +561,66 @@
                 
                 handDetected = true;
                 lastHandTime = Date.now();
+                
+                // 调试日志（每秒打印一次）
+                if (Date.now() % 1000 < 50) {
+                    console.log('✋ 手部检测:', Math.round(targetX), Math.round(targetY));
+                }
             }
         }
         
-        // ==================== MediaPipe 眨眼检测 ====================
+        // ==================== MediaPipe 面部识别（舌头检测）====================
         function onFaceResults(results) {
             if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
                 const landmarks = results.multiFaceLandmarks[0];
                 
-                // ===== 眨眼检测 =====
-                // 眼睛轮廓关键点
-                // 左眼: 33(外眼角), 133(内眼角), 159(上), 145(下)
-                // 右眼: 362(外眼角), 263(内眼角), 386(上), 374(下)
+                // 检测嘴巴张开程度和舌头
+                // 关键点: 13=上嘴唇内侧, 14=下嘴唇内侧, 78=嘴角右, 308=嘴角左
+                // 17=下巴, 0=鼻尖
+                const upperLip = landmarks[13];
+                const lowerLip = landmarks[14];
+                const mouthRight = landmarks[78];
+                const mouthLeft = landmarks[308];
+                const chin = landmarks[152];
+                const noseTip = landmarks[1];
                 
-                const leftOuter = landmarks[33];
-                const leftInner = landmarks[133];
-                const leftTop = landmarks[159];
-                const leftBottom = landmarks[145];
+                // 计算嘴巴垂直张开距离
+                const mouthOpenDist = Math.abs(lowerLip.y - upperLip.y);
                 
-                const rightOuter = landmarks[362];
-                const rightInner = landmarks[263];
-                const rightTop = landmarks[386];
-                const rightBottom = landmarks[374];
+                // 计算嘴巴宽度作为参考
+                const mouthWidth = Math.abs(mouthRight.x - mouthLeft.x);
                 
-                // 计算眼睛开合度 (眼睛高度 / 眼睛宽度)
-                const leftEyeWidth = Math.abs(leftInner.x - leftOuter.x);
-                const leftEyeHeight = Math.abs(leftBottom.y - leftTop.y);
-                const rightEyeWidth = Math.abs(rightInner.x - rightOuter.x);
-                const rightEyeHeight = Math.abs(rightBottom.y - rightTop.y);
+                // 嘴巴张开比例（垂直/水平）
+                const mouthOpenRatio = mouthOpenDist / mouthWidth;
                 
-                const leftEyeRatio = leftEyeHeight / leftEyeWidth;
-                const rightEyeRatio = rightEyeHeight / rightEyeWidth;
+                // 检测下嘴唇相对于下巴的位置
+                // 吐舌头时，下嘴唇和下巴之间的距离会变小
+                const lipToChin = Math.abs(chin.y - lowerLip.y);
+                const noseToLip = Math.abs(lowerLip.y - noseTip.y);
+                const lipChinRatio = lipToChin / noseToLip;
                 
-                // 判断眼睛是否闭合 (阈值约0.18)
-                leftEyeOpen = leftEyeRatio > 0.18;
-                rightEyeOpen = rightEyeRatio > 0.18;
+                // 判断是否吐舌头：简化为只检测嘴巴张开
+                // 降低阈值让检测更容易触发
+                const tongueDetected = mouthOpenRatio > 0.25;
                 
-                // 检测眨眼（两只眼睛同时闭合）
-                const bothEyesClosed = !leftEyeOpen && !rightEyeOpen;
-                
-                if (bothEyesClosed) {
-                    blinkFrames++;
-                    if (blinkFrames >= BLINK_THRESHOLD && blinkFrames < 15) {
-                        // 短暂眨眼触发吐舌头
+                if (tongueDetected) {
+                    tongueOutFrames++;
+                    if (tongueOutFrames >= TONGUE_THRESHOLD && !isTongueOut) {
+                        isTongueOut = true;
                         gecko.triggerTongue();
-                        console.log('😉 眨眼检测到！');
+                        console.log('👅 检测到吐舌头！ ratio:', mouthOpenRatio.toFixed(2));
                     }
                 } else {
-                    if (blinkFrames >= BLINK_THRESHOLD && blinkFrames < 15) {
-                        gecko.retractTongue();
+                    if (isTongueOut && tongueOutFrames > 0) {
+                        tongueOutFrames--;
+                        if (tongueOutFrames <= 0) {
+                            isTongueOut = false;
+                            gecko.retractTongue();
+                            console.log('👅 收回舌头');
+                        }
+                    } else {
+                        tongueOutFrames = 0;
                     }
-                    blinkFrames = 0;
                 }
             }
         }
@@ -632,8 +643,8 @@
                 
                 hands.onResults(onHandResults);
                 
-                // 初始化 MediaPipe Face Mesh（用于眨眼检测）
-                const faceMesh = new FaceMesh({
+                // 初始化 MediaPipe Face Mesh（用于舌头检测）
+                faceMesh = new FaceMesh({
                     locateFile: (file) => {
                         return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`;
                     }
@@ -641,7 +652,7 @@
                 
                 faceMesh.setOptions({
                     maxNumFaces: 1,
-                    refineLandmarks: false, // 眨眼检测不需要虹膜，关闭以加快加载
+                    refineLandmarks: true, // 启用精细面部特征
                     minDetectionConfidence: 0.5,
                     minTrackingConfidence: 0.5
                 });
@@ -651,9 +662,13 @@
                 // 初始化摄像头
                 const camera = new Camera(videoElement, {
                     onFrame: async () => {
-                        // 串行执行，避免冲突
-                        try { await hands.send({ image: videoElement }); } catch(e) {}
-                        try { await faceMesh.send({ image: videoElement }); } catch(e) {}
+                        // 串行运行，避免同时处理导致的问题
+                        try {
+                            await hands.send({ image: videoElement });
+                        } catch (e) { /* 忽略单帧错误 */ }
+                        try {
+                            await faceMesh.send({ image: videoElement });
+                        } catch (e) { /* 忽略单帧错误 */ }
                     },
                     width: 640,
                     height: 480
@@ -661,7 +676,7 @@
                 
                 await camera.start();
                 
-                statusElement.textContent = '✓ 手部追踪+眨眼检测已就绪';
+                statusElement.textContent = '✓ 手部+面部追踪已就绪';
                 statusElement.className = 'status ready';
                 
                 // 3秒后隐藏状态提示
@@ -672,7 +687,7 @@
                 
             } catch (error) {
                 console.error('摄像头初始化失败:', error);
-                statusElement.textContent = '✗ 摄像头访问失败，使用鼠标模式';
+                statusElement.textContent = '✗ 初始化失败: ' + error.message;
                 statusElement.className = 'status error';
                 
                 // 回退到鼠标模式
