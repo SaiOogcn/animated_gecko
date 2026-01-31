@@ -370,9 +370,14 @@
         let width, height, targetX, targetY, smoothTargetX, smoothTargetY, gecko;
         let handDetected = false;
         let lastHandTime = 0;
-        const SMOOTH_FACTOR = 0.12;
+        const SMOOTH_FACTOR = 0.06; // 降低平滑因子，更平滑
         const IDLE_THRESHOLD = 120;
         let idleTimer = 0, idleTarget = null, idleActionTimer = 0;
+        
+        // 额外的平滑层 - 用于过滤手部追踪的抖动
+        let rawTargetX, rawTargetY;
+        let filteredTargetX, filteredTargetY;
+        const RAW_SMOOTH = 0.15; // 原始输入的预平滑
         
         // 视频显示切换
         function toggleVideo() {
@@ -398,6 +403,8 @@
             gecko = new Gecko({ x: width / 2, y: height / 2 });
             targetX = smoothTargetX = width / 2;
             targetY = smoothTargetY = height / 2;
+            rawTargetX = filteredTargetX = width / 2;
+            rawTargetY = filteredTargetY = height / 2;
         }
         
         function generateIdleAction() {
@@ -439,9 +446,15 @@
                     currentTargetX = idleTarget.x; 
                     currentTargetY = idleTarget.y; 
                 }
+            } else {
+                // 第一层平滑：过滤手部追踪的原始抖动
+                filteredTargetX += (rawTargetX - filteredTargetX) * RAW_SMOOTH;
+                filteredTargetY += (rawTargetY - filteredTargetY) * RAW_SMOOTH;
+                currentTargetX = filteredTargetX;
+                currentTargetY = filteredTargetY;
             }
             
-            // 平滑插值
+            // 第二层平滑：壁虎跟随的平滑移动
             const factor = idleTimer > IDLE_THRESHOLD ? 0.08 : SMOOTH_FACTOR;
             smoothTargetX += (currentTargetX - smoothTargetX) * factor;
             smoothTargetY += (currentTargetY - smoothTargetY) * factor;
@@ -496,8 +509,12 @@
                 const indexFingerTip = landmarks[8];
                 
                 // 转换坐标（镜像翻转 + 缩放到画布）
-                targetX = (1 - indexFingerTip.x) * width;  // 镜像
-                targetY = indexFingerTip.y * height;
+                rawTargetX = (1 - indexFingerTip.x) * width;  // 镜像
+                rawTargetY = indexFingerTip.y * height;
+                
+                // 同时更新目标位置（用于绘制指示器）
+                targetX = rawTargetX;
+                targetY = rawTargetY;
                 
                 handDetected = true;
                 lastHandTime = Date.now();
@@ -555,14 +572,18 @@
         // 鼠标/触摸后备方案
         function enableMouseFallback() {
             canvas.addEventListener('mousemove', (e) => { 
-                targetX = e.clientX; 
-                targetY = e.clientY; 
+                rawTargetX = e.clientX; 
+                rawTargetY = e.clientY;
+                targetX = e.clientX;
+                targetY = e.clientY;
                 handDetected = true;
                 lastHandTime = Date.now();
             });
             canvas.addEventListener('touchmove', (e) => { 
                 e.preventDefault(); 
-                targetX = e.touches[0].clientX; 
+                rawTargetX = e.touches[0].clientX; 
+                rawTargetY = e.touches[0].clientY;
+                targetX = e.touches[0].clientX;
                 targetY = e.touches[0].clientY;
                 handDetected = true;
                 lastHandTime = Date.now();
