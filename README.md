@@ -51,7 +51,6 @@
 
 ```
 animated/
-├── gecko.html            # 完整注释版本
 ├── gecko_clean.html      # 精简版本
 ├── gecko_handtrack.html  # 手部追踪 + 眨眼吐舌（MediaPipe）
 ├── gecko_eatbug.html     # 吃虫子演示（小虫生成、捕食逻辑）
