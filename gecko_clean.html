@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>程序化壁虎动画</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { overflow: hidden; background: #282c34; }
+        canvas { display: block; }
+        .info {
+            position: fixed; bottom: 20px; left: 20px;
+            color: rgba(255, 255, 255, 0.6);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div class="info">移动鼠标控制壁虎的爬行方向</div>
+    <script>
+        // 工具函数
+        function simplifyAngle(angle) {
+            while (angle >= Math.PI * 2) angle -= Math.PI * 2;
+            while (angle < 0) angle += Math.PI * 2;
+            return angle;
+        }
+
+        function relativeAngleDiff(angle, anchor) {
+            angle = simplifyAngle(angle + Math.PI - anchor);
+            return Math.PI - angle;
+        }
+
+        function constrainAngle(angle, anchor, constraint) {
+            if (Math.abs(relativeAngleDiff(angle, anchor)) <= constraint) return simplifyAngle(angle);
+            if (relativeAngleDiff(angle, anchor) > constraint) return simplifyAngle(anchor - constraint);
+            return simplifyAngle(anchor + constraint);
+        }
+
+        function constrainDistance(pos, anchor, constraint) {
+            const dx = pos.x - anchor.x, dy = pos.y - anchor.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist === 0) return { x: anchor.x + constraint, y: anchor.y };
+            return { x: anchor.x + (dx / dist) * constraint, y: anchor.y + (dy / dist) * constraint };
+        }
+
+        function vecAdd(a, b) { return { x: a.x + b.x, y: a.y + b.y }; }
+        function vecSub(a, b) { return { x: a.x - b.x, y: a.y - b.y }; }
+        function vecMag(v) { return Math.sqrt(v.x * v.x + v.y * v.y); }
+        function vecSetMag(v, mag) {
+            const m = vecMag(v);
+            if (m === 0) return { x: mag, y: 0 };
+            return { x: (v.x / m) * mag, y: (v.y / m) * mag };
+        }
+        function vecHeading(v) { return Math.atan2(v.y, v.x); }
+        function vecFromAngle(angle, mag = 1) { return { x: Math.cos(angle) * mag, y: Math.sin(angle) * mag }; }
+        function vecDist(a, b) { return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2); }
+        function vecLerp(a, b, t) { return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }; }
+
+        // 链式骨骼系统
+        class Chain {
+            constructor(origin, jointCount, linkSize, angleConstraint = Math.PI * 2) {
+                this.linkSize = linkSize;
+                this.angleConstraint = angleConstraint;
+                this.joints = [];
+                this.angles = [];
+                const initialAngle = -Math.PI / 2;
+                this.joints.push({ x: origin.x, y: origin.y });
+                this.angles.push(initialAngle);
+                for (let i = 1; i < jointCount; i++) {
+                    this.joints.push({
+                        x: this.joints[i - 1].x - Math.cos(initialAngle) * this.linkSize,
+                        y: this.joints[i - 1].y - Math.sin(initialAngle) * this.linkSize
+                    });
+                    this.angles.push(initialAngle);
+                }
+            }
+
+            resolve(pos) {
+                const headDiff = vecSub(pos, this.joints[0]);
+                const headDist = vecMag(headDiff);
+                if (headDist < 0.5) return;
+                this.angles[0] = vecHeading(headDiff);
+                this.joints[0] = { x: pos.x, y: pos.y };
+                for (let i = 1; i < this.joints.length; i++) {
+                    const diff = vecSub(this.joints[i - 1], this.joints[i]);
+                    if (vecMag(diff) > 0.5) {
+                        this.angles[i] = constrainAngle(vecHeading(diff), this.angles[i - 1], this.angleConstraint);
+                    }
+                    const offset = vecFromAngle(this.angles[i], this.linkSize);
+                    this.joints[i] = vecSub(this.joints[i - 1], offset);
+                }
+            }
+
+            fabrikResolve(pos, anchor) {
+                const footDist = vecMag(vecSub(pos, this.joints[0]));
+                const anchorDist = vecMag(vecSub(anchor, this.joints[this.joints.length - 1]));
+                if (footDist < 0.5 && anchorDist < 0.5) return;
+                this.joints[0] = { x: pos.x, y: pos.y };
+                for (let i = 1; i < this.joints.length; i++) {
+                    this.joints[i] = constrainDistance(this.joints[i], this.joints[i - 1], this.linkSize);
+                }
+                this.joints[this.joints.length - 1] = { x: anchor.x, y: anchor.y };
+                for (let i = this.joints.length - 2; i >= 0; i--) {
+                    this.joints[i] = constrainDistance(this.joints[i], this.joints[i + 1], this.linkSize);
+                }
+            }
+        }
+
+        // 壁虎类
+        class Gecko {
+            constructor(origin) {
+                this.spine = new Chain(origin, 14, 50, Math.PI / 8);
+                this.bodyWidth = [42, 48, 34, 50, 56, 58, 52, 40, 22, 12, 9, 7, 5, 5];
+                this.legs = [];
+                this.legTargets = [];
+                for (let i = 0; i < 4; i++) {
+                    this.legs.push(new Chain(origin, 3, i < 2 ? 42 : 32));
+                    const side = i % 2 === 0 ? 1 : -1;
+                    const bodyIndex = i < 2 ? 3 : 7;
+                    const angle = i < 2 ? Math.PI / 4 : Math.PI / 3;
+                    this.legTargets.push({ x: this.getPosX(bodyIndex, angle * side, 70), y: this.getPosY(bodyIndex, angle * side, 70) });
+                }
+                this.bodyColor = '#8BC48A';
+                this.legColor = '#8BC48A';
+                this.tongueOut = 0;
+                this.tongueTarget = 0;
+                this.tongueTimer = 0;
+                this.tongueColor = '#FFB6C1';
+                this.scheduleNextTongue();
+                this.initialized = false;
+            }
+            
+            scheduleNextTongue() { this.tongueTimer = 120 + Math.random() * 240; }
+            
+            updateTongue() {
+                this.tongueTimer--;
+                if (this.tongueTimer <= 0 && this.tongueTarget === 0 && this.tongueOut === 0) this.tongueTarget = 1;
+                if (this.tongueTarget === 1) {
+                    this.tongueOut += 0.15;
+                    if (this.tongueOut >= 1) { this.tongueOut = 1; this.tongueTarget = -1; }
+                } else if (this.tongueTarget === -1) {
+                    this.tongueOut -= 0.1;
+                    if (this.tongueOut <= 0) { this.tongueOut = 0; this.tongueTarget = 0; this.scheduleNextTongue(); }
+                }
+            }
+
+            resolve(mouseX, mouseY) {
+                const headPos = this.spine.joints[0];
+                const direction = vecSub({ x: mouseX, y: mouseY }, headPos);
+                const dist = vecMag(direction);
+                if (dist > 2) {
+                    const moveSpeed = Math.min(dist * 0.3, 8);
+                    this.spine.resolve(vecAdd(headPos, vecSetMag(direction, moveSpeed)));
+                    this.initialized = true;
+                }
+                if (!this.initialized) return;
+                for (let i = 0; i < this.legs.length; i++) {
+                    const side = i % 2 === 0 ? 1 : -1;
+                    const bodyIndex = i < 2 ? 3 : 7;
+                    const angle = i < 2 ? Math.PI / 4 : Math.PI / 3;
+                    const desiredPos = { x: this.getPosX(bodyIndex, angle * side, 70), y: this.getPosY(bodyIndex, angle * side, 70) };
+                    if (vecDist(desiredPos, this.legTargets[i]) > 160) this.legTargets[i] = desiredPos;
+                    const anchor = { x: this.getPosX(bodyIndex, Math.PI / 2 * side, -16), y: this.getPosY(bodyIndex, Math.PI / 2 * side, -16) };
+                    this.legs[i].fabrikResolve(vecLerp(this.legs[i].joints[0], this.legTargets[i], 0.35), anchor);
+                }
+            }
+
+            display(ctx) {
+                this.updateTongue();
+                this.drawLegs(ctx);
+                this.drawTongue(ctx);
+                this.drawBody(ctx);
+                this.drawEyes(ctx);
+                this.drawPatterns(ctx);
+            }
+            
+            drawTongue(ctx) {
+                if (this.tongueOut <= 0) return;
+                const headAngle = this.spine.angles[0];
+                const headPos = this.spine.joints[0];
+                const tongueBase = { x: headPos.x + Math.cos(headAngle) * 35, y: headPos.y + Math.sin(headAngle) * 35 };
+                const tongueLength = 35 * this.tongueOut;
+                const forkLength = 12 * this.tongueOut;
+                const forkAngle = Math.PI / 8;
+                const tongueMid = { x: tongueBase.x + Math.cos(headAngle) * tongueLength, y: tongueBase.y + Math.sin(headAngle) * tongueLength };
+                const forkLeft = { x: tongueMid.x + Math.cos(headAngle - forkAngle) * forkLength, y: tongueMid.y + Math.sin(headAngle - forkAngle) * forkLength };
+                const forkRight = { x: tongueMid.x + Math.cos(headAngle + forkAngle) * forkLength, y: tongueMid.y + Math.sin(headAngle + forkAngle) * forkLength };
+                ctx.strokeStyle = this.tongueColor;
+                ctx.lineWidth = 3;
+                ctx.lineCap = 'round';
+                ctx.beginPath(); ctx.moveTo(tongueBase.x, tongueBase.y); ctx.lineTo(tongueMid.x, tongueMid.y); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(forkLeft.x, forkLeft.y); ctx.lineTo(tongueMid.x, tongueMid.y); ctx.lineTo(forkRight.x, forkRight.y); ctx.stroke();
+            }
+
+            drawLegs(ctx) {
+                for (let i = 0; i < this.legs.length; i++) {
+                    const elbow = { ...this.legs[i].joints[1] };
+                    const foot = this.legs[i].joints[0];
+                    const shoulder = this.legs[i].joints[2];
+                    const para = vecSub(foot, shoulder);
+                    const perpNorm = vecSetMag({ x: -para.y, y: para.x }, 25);
+                    if (i === 2) { elbow.x -= perpNorm.x; elbow.y -= perpNorm.y; }
+                    else if (i === 3) { elbow.x += perpNorm.x; elbow.y += perpNorm.y; }
+                    this.drawToePads(ctx, foot, elbow);
+                }
+                for (let i = 0; i < this.legs.length; i++) {
+                    const shoulder = this.legs[i].joints[2];
+                    const elbow = { ...this.legs[i].joints[1] };
+                    const foot = this.legs[i].joints[0];
+                    const para = vecSub(foot, shoulder);
+                    const perpNorm = vecSetMag({ x: -para.y, y: para.x }, 25);
+                    if (i === 2) { elbow.x -= perpNorm.x; elbow.y -= perpNorm.y; }
+                    else if (i === 3) { elbow.x += perpNorm.x; elbow.y += perpNorm.y; }
+                    ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 28; ctx.lineCap = 'round';
+                    ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.quadraticCurveTo(elbow.x, elbow.y, foot.x, foot.y); ctx.stroke();
+                    ctx.strokeStyle = this.legColor; ctx.lineWidth = 22;
+                    ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.quadraticCurveTo(elbow.x, elbow.y, foot.x, foot.y); ctx.stroke();
+                }
+            }
+
+            drawToePads(ctx, foot, elbow) {
+                const angle = vecHeading(vecSub(foot, elbow));
+                const toeSpread = Math.PI / 2.5;
+                for (let j = 0; j < 4; j++) {
+                    const toeAngle = angle - toeSpread / 2 + (toeSpread / 3) * j;
+                    const toeStart = { x: foot.x + Math.cos(toeAngle) * 4, y: foot.y + Math.sin(toeAngle) * 4 };
+                    const toeEnd = { x: foot.x + Math.cos(toeAngle) * 18, y: foot.y + Math.sin(toeAngle) * 18 };
+                    ctx.strokeStyle = '#A8D9A7'; ctx.lineWidth = 8; ctx.lineCap = 'round';
+                    ctx.beginPath(); ctx.moveTo(toeStart.x, toeStart.y); ctx.lineTo(toeEnd.x, toeEnd.y); ctx.stroke();
+                    const perpAngle = toeAngle + Math.PI / 2, offset = 4;
+                    ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2;
+                    ctx.beginPath(); ctx.moveTo(toeStart.x + Math.cos(perpAngle) * offset, toeStart.y + Math.sin(perpAngle) * offset);
+                    ctx.lineTo(toeEnd.x + Math.cos(perpAngle) * offset, toeEnd.y + Math.sin(perpAngle) * offset); ctx.stroke();
+                    ctx.beginPath(); ctx.moveTo(toeStart.x - Math.cos(perpAngle) * offset, toeStart.y - Math.sin(perpAngle) * offset);
+                    ctx.lineTo(toeEnd.x - Math.cos(perpAngle) * offset, toeEnd.y - Math.sin(perpAngle) * offset); ctx.stroke();
+                    ctx.beginPath(); ctx.arc(toeEnd.x, toeEnd.y, offset, toeAngle - Math.PI/2, toeAngle + Math.PI/2); ctx.stroke();
+                }
+            }
+
+            drawBody(ctx) {
+                const joints = this.spine.joints, angles = this.spine.angles;
+                const headAngle = angles[0], headPos = joints[0];
+                ctx.fillStyle = this.bodyColor; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 4;
+                ctx.beginPath();
+                const headTip = { x: headPos.x + Math.cos(headAngle) * 45, y: headPos.y + Math.sin(headAngle) * 45 };
+                const rightPoints = [], leftPoints = [];
+                for (let i = 0; i < joints.length; i++) rightPoints.push({ x: this.getPosX(i, Math.PI / 2, 0), y: this.getPosY(i, Math.PI / 2, 0) });
+                for (let i = joints.length - 1; i >= 0; i--) leftPoints.push({ x: this.getPosX(i, -Math.PI / 2, 0), y: this.getPosY(i, -Math.PI / 2, 0) });
+                ctx.moveTo(rightPoints[0].x, rightPoints[0].y);
+                for (let i = 1; i < rightPoints.length; i++) {
+                    const prev = rightPoints[i - 1], curr = rightPoints[i];
+                    ctx.quadraticCurveTo(prev.x, prev.y, (prev.x + curr.x) / 2, (prev.y + curr.y) / 2);
+                }
+                ctx.lineTo(rightPoints[rightPoints.length - 1].x, rightPoints[rightPoints.length - 1].y);
+                ctx.lineTo(leftPoints[0].x, leftPoints[0].y);
+                for (let i = 1; i < leftPoints.length; i++) {
+                    const prev = leftPoints[i - 1], curr = leftPoints[i];
+                    ctx.quadraticCurveTo(prev.x, prev.y, (prev.x + curr.x) / 2, (prev.y + curr.y) / 2);
+                }
+                const leftHead = leftPoints[leftPoints.length - 1], rightHead = rightPoints[0];
+                const leftCtrl = { x: leftHead.x + Math.cos(headAngle) * 25, y: leftHead.y + Math.sin(headAngle) * 25 };
+                const rightCtrl = { x: rightHead.x + Math.cos(headAngle) * 25, y: rightHead.y + Math.sin(headAngle) * 25 };
+                ctx.bezierCurveTo(leftCtrl.x, leftCtrl.y, headTip.x, headTip.y, headTip.x, headTip.y);
+                ctx.bezierCurveTo(headTip.x, headTip.y, rightCtrl.x, rightCtrl.y, rightHead.x, rightHead.y);
+                ctx.closePath(); ctx.fill(); ctx.stroke();
+            }
+
+            drawEyes(ctx) {
+                const headAngle = this.spine.angles[0], headPos = this.spine.joints[0];
+                const eyeOffset = 30, eyeForward = 5;
+                const leftEye = { x: headPos.x + Math.cos(headAngle) * eyeForward + Math.cos(headAngle - Math.PI/2) * eyeOffset,
+                                  y: headPos.y + Math.sin(headAngle) * eyeForward + Math.sin(headAngle - Math.PI/2) * eyeOffset };
+                const rightEye = { x: headPos.x + Math.cos(headAngle) * eyeForward + Math.cos(headAngle + Math.PI/2) * eyeOffset,
+                                   y: headPos.y + Math.sin(headAngle) * eyeForward + Math.sin(headAngle + Math.PI/2) * eyeOffset };
+                ctx.fillStyle = '#ffffff';
+                ctx.beginPath(); ctx.arc(leftEye.x, leftEye.y, 12, 0, Math.PI * 2); ctx.fill();
+                ctx.beginPath(); ctx.arc(rightEye.x, rightEye.y, 12, 0, Math.PI * 2); ctx.fill();
+            }
+
+            drawPatterns(ctx) {
+                ctx.fillStyle = 'rgba(150, 210, 150, 0.5)';
+                for (const i of [2, 4, 6, 8]) {
+                    if (i < this.spine.joints.length) {
+                        ctx.beginPath(); ctx.arc(this.spine.joints[i].x, this.spine.joints[i].y, this.bodyWidth[i] * 0.4, 0, Math.PI * 2); ctx.fill();
+                    }
+                }
+                ctx.fillStyle = 'rgba(120, 180, 120, 0.4)';
+                for (let i = 1; i < 8; i += 2) {
+                    const spotSize = this.bodyWidth[i] * 0.25;
+                    ctx.beginPath(); ctx.arc(this.getPosX(i, Math.PI / 2, -spotSize), this.getPosY(i, Math.PI / 2, -spotSize), spotSize, 0, Math.PI * 2); ctx.fill();
+                    ctx.beginPath(); ctx.arc(this.getPosX(i, -Math.PI / 2, -spotSize), this.getPosY(i, -Math.PI / 2, -spotSize), spotSize, 0, Math.PI * 2); ctx.fill();
+                }
+            }
+
+            getPosX(i, angleOffset, lengthOffset) {
+                return Math.round((this.spine.joints[i].x + Math.cos(this.spine.angles[i] + angleOffset) * (this.bodyWidth[i] + lengthOffset)) * 100) / 100;
+            }
+            getPosY(i, angleOffset, lengthOffset) {
+                return Math.round((this.spine.joints[i].y + Math.sin(this.spine.angles[i] + angleOffset) * (this.bodyWidth[i] + lengthOffset)) * 100) / 100;
+            }
+        }
+
+        // 主程序
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let width, height, mouseX, mouseY, lastMouseX, lastMouseY, smoothMouseX, smoothMouseY, gecko;
+        const SMOOTH_FACTOR = 0.15, DEAD_ZONE = 3, IDLE_THRESHOLD = 120;
+        let idleTimer = 0, idleTarget = null, idleActionTimer = 0;
+        
+        function resize() { width = window.innerWidth; height = window.innerHeight; canvas.width = width; canvas.height = height; }
+        
+        function init() {
+            resize();
+            gecko = new Gecko({ x: width / 2, y: height / 2 });
+            mouseX = mouseY = lastMouseX = lastMouseY = smoothMouseX = smoothMouseY = width / 2;
+            mouseY = lastMouseY = smoothMouseY = height / 2;
+        }
+        
+        function generateIdleAction() {
+            const headPos = gecko.spine.joints[0], headAngle = gecko.spine.angles[0];
+            if (Math.random() < 0.5) {
+                const swayAngle = headAngle + (Math.random() - 0.5) * Math.PI / 3;
+                idleTarget = { x: headPos.x + Math.cos(swayAngle) * (30 + Math.random() * 20), y: headPos.y + Math.sin(swayAngle) * (30 + Math.random() * 20) };
+            } else {
+                const moveAngle = headAngle + (Math.random() - 0.5) * Math.PI / 2;
+                idleTarget = { x: headPos.x + Math.cos(moveAngle) * (40 + Math.random() * 60), y: headPos.y + Math.sin(moveAngle) * (40 + Math.random() * 60) };
+            }
+            idleTarget.x = Math.max(100, Math.min(width - 100, idleTarget.x));
+            idleTarget.y = Math.max(100, Math.min(height - 100, idleTarget.y));
+            idleActionTimer = 30 + Math.random() * 90;
+        }
+        
+        function animate() {
+            ctx.fillStyle = '#282c34'; ctx.fillRect(0, 0, width, height);
+            drawGrid(ctx);
+            const mouseMoved = Math.abs(mouseX - lastMouseX) > 1 || Math.abs(mouseY - lastMouseY) > 1;
+            lastMouseX = mouseX; lastMouseY = mouseY;
+            if (mouseMoved) { idleTimer = 0; idleTarget = null; } else { idleTimer++; }
+            let targetX = mouseX, targetY = mouseY;
+            if (idleTimer > IDLE_THRESHOLD) {
+                idleActionTimer--;
+                if (idleActionTimer <= 0 || !idleTarget) generateIdleAction();
+                if (idleTarget) { targetX = idleTarget.x; targetY = idleTarget.y; }
+            }
+            const dx = targetX - smoothMouseX, dy = targetY - smoothMouseY, dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist > DEAD_ZONE) {
+                const factor = idleTimer > IDLE_THRESHOLD ? 0.08 : SMOOTH_FACTOR;
+                smoothMouseX += dx * factor; smoothMouseY += dy * factor;
+            }
+            gecko.resolve(smoothMouseX, smoothMouseY);
+            gecko.display(ctx);
+            requestAnimationFrame(animate);
+        }
+        
+        function drawGrid(ctx) {
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.03)'; ctx.lineWidth = 1;
+            for (let x = 0; x < width; x += 50) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke(); }
+            for (let y = 0; y < height; y += 50) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke(); }
+        }
+        
+        window.addEventListener('resize', resize);
+        canvas.addEventListener('mousemove', (e) => { mouseX = e.clientX; mouseY = e.clientY; });
+        canvas.addEventListener('touchmove', (e) => { e.preventDefault(); mouseX = e.touches[0].clientX; mouseY = e.touches[0].clientY; });
+        init(); animate();
+    </script>
+</body>
+</html>
